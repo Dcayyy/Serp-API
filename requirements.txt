@@ -1,0 +1,19 @@
+# Core search functionality
+requests[socks]>=2.22.0
+beautifulsoup4>=4.10.0
+
+# API framework for Python 3.13
+fastapi>=0.103.1
+uvicorn>=0.23.0
+starlette>=0.27.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Performance and concurrency
+httpx>=0.25.0
+
+# Additional dependencies
+typing-extensions>=4.7.0
+
+# Note: Removed asyncio as it's part of the standard library
+# Note: Removed pydantic-settings as older pydantic versions don't need it

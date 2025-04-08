@@ -1,0 +1,1 @@
+"""Pydantic schemas for the Search Engines Scraper API.""" 
