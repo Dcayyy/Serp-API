@@ -43,20 +43,30 @@ async def search_by_company_name(
         
         # Create search service with concurrent execution
         search_service = SearchService(
-            engines=engines,
-            use_proxy=request.use_proxy or settings.USE_PROXY,
+            proxy=settings.PROXY_URL if request.use_proxy or settings.USE_PROXY else None,
             use_concurrent=settings.USE_CONCURRENT_SEARCH,
             max_workers=settings.MAX_CONCURRENT_SEARCHES
         )
         
         # Perform the search
-        results = search_service.search_by_company(
+        results = search_service.execute_company_search(
             company_name=request.company_name,
-            pages=min(request.pages, settings.MAX_SEARCH_PAGES),
-            ignore_duplicates=request.ignore_duplicates
+            engines=engines,
+            page=min(request.pages, settings.MAX_SEARCH_PAGES),
+            filter_duplicates=request.ignore_duplicates
         )
         
-        return JSONResponse(content=results)
+        # Convert results to JSON-serializable format
+        serializable_results = {}
+        for query_type, engine_results in results.items():
+            serializable_results[query_type] = {}
+            for engine, search_results in engine_results.items():
+                serializable_results[query_type][engine] = [
+                    {"title": r.title, "url": r.url, "snippet": r.snippet} 
+                    for r in search_results
+                ]
+        
+        return JSONResponse(content=serializable_results)
         
     except ValueError as e:
         # Handle validation errors

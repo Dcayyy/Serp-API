@@ -14,6 +14,29 @@ except ImportError:
     USING_PYDANTIC_V2 = False
 
 
+class SearchQuery(BaseModel):
+    """
+    Schema for a structured search query to be executed across search engines.
+    This is the core input model for search operations.
+    """
+    query: str = Field(..., description="The search query string")
+    page: Optional[int] = Field(1, description="Page number for pagination")
+    language: Optional[str] = Field(None, description="Language code (e.g. 'en')")
+    region: Optional[str] = Field(None, description="Region code (e.g. 'us')")
+    safe_search: Optional[bool] = Field(None, description="Whether to enable safe search")
+    time_period: Optional[str] = Field(None, description="Time period for results (e.g. 'day', 'week', 'month', 'year')")
+    sort_by: Optional[str] = Field(None, description="Sort criteria (e.g. 'relevance', 'date')")
+    search_type: Optional[str] = Field("web", description="Type of search (e.g. 'web', 'images', 'news')")
+    limit: Optional[int] = Field(10, description="Maximum number of results to return")
+
+    def dict(self, *args, **kwargs):
+        """Support for both pydantic v1 and v2 API"""
+        if USING_PYDANTIC_V2:
+            return super().model_dump(*args, **kwargs)
+        else:
+            return super().dict(*args, **kwargs)
+
+
 class DomainSearchRequest(BaseModel):
     domain: str = Field(..., description="Company domain to search for")
     engines: Optional[List[str]] = Field(None, description="Search engines to use")
@@ -54,9 +77,14 @@ class CompanySearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
-    title: str = Field(..., description="Title of the search result")
+    title: str = Field("", description="Title of the search result")
     url: str = Field(..., description="URL of the search result")
-    description: str = Field(..., description="Description or text snippet of the search result")
+    snippet: str = Field("", description="Description or text snippet of the search result")
+    
+    # Alias for compatibility with different naming conventions
+    @property
+    def description(self) -> str:
+        return self.snippet
 
 
 class EngineResults(BaseModel):

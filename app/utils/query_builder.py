@@ -22,7 +22,7 @@ def build_domain_query(domain: str) -> str:
     return f'"{domain}" OR "www.{domain}" OR "https://{domain}" OR "http://{domain}"'
 
 
-def build_full_search_query(full_name: str, domain: str) -> str:
+def build_full_query(full_name: str, domain: str) -> str:
     """
     Build a search query for a person's name at a company domain.
     
@@ -121,7 +121,7 @@ def build_full_search_query(full_name: str, domain: str) -> str:
     return f'"{full_name}" "@{domain}" ({email_query})'
 
 
-def build_company_search_query(company_name: str) -> str:
+def build_company_name_query(company_name: str) -> str:
     """
     Build a search query for a company name.
     
@@ -210,7 +210,7 @@ if __name__ == "__main__":
     
     # Test full search query
     test_name = "Sylia H."
-    full_query = build_full_search_query(test_name, test_domain)
+    full_query = build_full_query(test_name, test_domain)
     print("\nFULL SEARCH QUERY TEST:")
     print(f"Name: {test_name}, Domain: {test_domain}")
     print(f"Query length: {len(full_query)} characters")
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     
     # Test company search query
     test_company = "Impulse Notion"
-    company_query = build_company_search_query(test_company)
+    company_query = build_company_name_query(test_company)
     print("\nCOMPANY QUERY TEST:")
     print(f"Company: {test_company}")
     print(f"Query: {company_query}")
@@ -227,7 +227,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         custom_name = sys.argv[1]
         custom_domain = sys.argv[2] if len(sys.argv) > 2 else "example.com"
-        custom_query = build_full_search_query(custom_name, custom_domain)
+        custom_query = build_full_query(custom_name, custom_domain)
         print(f"\nCUSTOM QUERY TEST:")
         print(f"Name: {custom_name}, Domain: {custom_domain}")
         print(f"Query: {custom_query}") 

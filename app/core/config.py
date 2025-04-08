@@ -47,6 +47,9 @@ class Settings(Settings):
 
     # Rate limiting bypass settings
     USE_USER_AGENT_ROTATION: bool = True  # Enable user agent rotation
+    USE_RANDOM_DELAYS: bool = True        # Enable random delays between requests
+    MIN_REQUEST_DELAY: float = 0.5        # Minimum delay in seconds
+    MAX_REQUEST_DELAY: float = 2.0        # Maximum delay in seconds
 
     # Configure to read from .env file
     if USING_PYDANTIC_V2:

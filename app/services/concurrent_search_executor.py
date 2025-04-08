@@ -1,178 +1,342 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, List, Optional, Set, Any
 import logging
 import time
-import traceback
-import concurrent.futures
-from threading import Lock
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
-from app.services.engine_factory import EngineFactory
+from app.core.config import settings
+from app.schemas.search import SearchQuery, SearchResult
+from app.services.engine_factory import SearchEngineFactory
+from app.utils.throttle import RequestThrottler
 
 logger = logging.getLogger(__name__)
 
 
 class ConcurrentSearchExecutor:
-    """Class for executing search operations across engines concurrently."""
+    """
+    Class for executing search operations across engines concurrently using thread pool.
+    This is especially useful for large numbers of engines or queries.
+    """
     
-    def __init__(self, engine_factory: EngineFactory, max_workers: int = 5):
+    def __init__(
+        self,
+        engine_factory: Optional[SearchEngineFactory] = None,
+        throttler: Optional[RequestThrottler] = None,
+        max_workers: int = settings.MAX_CONCURRENT_SEARCHES,
+        max_results_per_engine: int = settings.SEARCH_RESULTS_LIMIT,
+    ):
         """
         Initialize the concurrent search executor.
         
         Args:
             engine_factory: Factory for creating search engine instances
-            max_workers: Maximum number of concurrent workers (default: 5)
+            throttler: Request throttler for limiting request rates
+            max_workers: Maximum number of concurrent workers
+            max_results_per_engine: Maximum number of results to return per engine
         """
-        self.engine_factory = engine_factory
+        self.engine_factory = engine_factory or SearchEngineFactory()
+        self.throttler = throttler or RequestThrottler()
         self.max_workers = max_workers
-        self.result_lock = Lock()  # Lock for thread-safe result updates
-        logger.debug(f"ConcurrentSearchExecutor initialized with max_workers: {max_workers}")
+        self.max_results_per_engine = max_results_per_engine
+        self._result_lock = threading.Lock()
+        logger.debug(f"ConcurrentSearchExecutor initialized with max {max_workers} workers and throttler: {self.throttler}")
     
-    def execute_search(self, 
-                      query: str, 
-                      engines: List[str], 
-                      pages: int = 1, 
-                      ignore_duplicates: bool = True) -> Dict[str, Any]:
+    def execute_search(
+        self,
+        query: SearchQuery,
+        engines: Optional[List[str]] = None,
+        filter_duplicates: bool = True,
+    ) -> Dict[str, List[SearchResult]]:
         """
         Execute a search across specified engines concurrently.
         
         Args:
-            query: Search query to execute
-            engines: List of search engines to use
-            pages: Number of result pages to retrieve
-            ignore_duplicates: Whether to ignore duplicate URLs
+            query: SearchQuery object containing the search parameters
+            engines: List of engine names to use, or None for default engines
+            filter_duplicates: Whether to filter duplicate results across engines
             
         Returns:
-            Dict mapping engine names to their search results
+            Dictionary mapping engine names to lists of search results
         """
-        engine_results = {}
+        engines = engines or settings.DEFAULT_SEARCH_ENGINES
+        threads = min(self.max_workers, len(engines))
         
-        logger.info(f"Starting concurrent search across {len(engines)} engines")
-        logger.debug(f"Query: {query}")
+        logger.info(f"Starting concurrent search for '{query.query}' across {len(engines)} engines with {threads} threads")
         
-        # Use ThreadPoolExecutor to run searches in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(engines))) as executor:
-            # Submit all search tasks
-            future_to_engine = {
-                executor.submit(
-                    self._search_with_engine, 
-                    engine_name, 
-                    query, 
-                    pages, 
-                    ignore_duplicates
-                ): engine_name 
-                for engine_name in engines
-            }
+        results: Dict[str, List[SearchResult]] = {}
+        seen_urls: Set[str] = set()
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            # Create a thread-safe queue of engines to process
+            engine_queue = queue.Queue()
+            for engine_name in engines:
+                engine_queue.put(engine_name)
             
-            # Process results as they complete
-            for future in concurrent.futures.as_completed(future_to_engine):
-                engine_name = future_to_engine[future]
+            # Submit search tasks for each engine
+            futures = []
+            for _ in range(threads):
+                future = executor.submit(
+                    self._worker_search_engine,
+                    query,
+                    engine_queue,
+                    results,
+                    seen_urls,
+                    filter_duplicates
+                )
+                futures.append(future)
+            
+            # Wait for all tasks to complete
+            for future in futures:
                 try:
-                    result = future.result()
-                    if result:
-                        with self.result_lock:
-                            engine_results[engine_name] = result
-                            
+                    future.result()
                 except Exception as e:
-                    logger.error(f"Error in concurrent search for {engine_name}: {str(e)}")
-                    logger.debug(traceback.format_exc())
+                    logger.error(f"Error in search worker thread: {str(e)}")
         
-        logger.info(f"Completed concurrent search across {len(engines)} engines, got {len(engine_results)} results")
-        return engine_results
+        # Filter results if needed and log summary
+        total_results = sum(len(results_list) for results_list in results.values())
+        logger.info(f"Concurrent search completed with {total_results} total results from {len(results)} engines")
+        
+        return results
     
-    def _search_with_engine(self, engine_name: str, query: str, pages: int, ignore_duplicates: bool) -> Optional[Any]:
+    def _worker_search_engine(
+        self,
+        query: SearchQuery,
+        engine_queue: queue.Queue,
+        results: Dict[str, List[SearchResult]],
+        seen_urls: Set[str],
+        filter_duplicates: bool
+    ):
         """
-        Execute a search on a single engine (used for concurrent execution).
+        Worker thread function that processes engines from the queue.
         
         Args:
-            engine_name: Name of the search engine to use
-            query: Search query to execute
-            pages: Number of result pages to retrieve
-            ignore_duplicates: Whether to ignore duplicate URLs
+            query: SearchQuery object containing the search parameters
+            engine_queue: Queue of engine names to process
+            results: Dict to store search results (thread-safe with lock)
+            seen_urls: Set of seen URLs for deduplication (thread-safe with lock)
+            filter_duplicates: Whether to filter duplicate results
+        """
+        while not engine_queue.empty():
+            try:
+                # Get the next engine to process
+                engine_name = engine_queue.get_nowait()
+                
+                # Apply throttling before making the request
+                self.throttler.throttle(engine_name)
+                
+                try:
+                    # Execute search on this engine
+                    engine_results = self.execute_single_engine_search(query, engine_name)
+                    
+                    # Store results (thread-safe)
+                    with self._result_lock:
+                        # Filter duplicate results if requested
+                        if filter_duplicates:
+                            filtered_results = []
+                            for result in engine_results:
+                                if result.url not in seen_urls:
+                                    seen_urls.add(result.url)
+                                    filtered_results.append(result)
+                            engine_results = filtered_results
+                        
+                        results[engine_name] = engine_results
+                        
+                except Exception as e:
+                    logger.error(f"Error executing search on {engine_name}: {str(e)}")
+                
+                # Mark this task as done
+                engine_queue.task_done()
+                
+            except queue.Empty:
+                # No more engines to process
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in search worker: {str(e)}")
+    
+    def execute_single_engine_search(
+        self,
+        query: SearchQuery,
+        engine_name: str,
+    ) -> List[SearchResult]:
+        """
+        Execute a search on a single engine.
+        
+        Args:
+            query: SearchQuery object containing the search parameters
+            engine_name: Name of the engine to use
             
         Returns:
-            Search results or None if search failed
+            List of search results from the engine
         """
-        logger.info(f"Starting search on {engine_name}")
-        
         try:
-            engine = self.engine_factory.create_engine(engine_name)
-            engine.ignore_duplicate_urls = ignore_duplicates
+            # Get an engine instance from the factory
+            engine = self.engine_factory.get_engine(engine_name)
             
-            # Execute search
-            logger.debug(f"Executing {engine_name} search for: {query}")
+            # Apply rate limiting before executing search
+            self.throttler.throttle(engine_name)
+            
+            # Execute the search with standard parameters
             start_time = time.time()
             
-            try:
-                engine.search(query, pages)
-                end_time = time.time()
-                
-                # Store results
-                results = engine.results
-                links = results.links() if hasattr(results, 'links') else []
-                
-                logger.info(f"{engine_name} search completed in {end_time - start_time:.2f}s, found {len(links)} results")
-                return results
-            except Exception as e:
-                logger.error(f"Error during {engine_name} search operation: {str(e)}")
-                logger.debug(traceback.format_exc())
-                return None
-                
+            # Standard search engines package uses different parameter names
+            results = engine.search(
+                query.query,
+                pages=query.page or 1
+            )
+            
+            duration = time.time() - start_time
+            logger.debug(f"Search on {engine_name} returned {len(results.links()) if hasattr(results, 'links') else 0} results in {duration:.2f}s")
+            
+            # Convert to SearchResult objects
+            search_results = []
+            if hasattr(results, 'results'):
+                for item in results.results():
+                    search_results.append(
+                        SearchResult(
+                            title=item.get('title', ''),
+                            url=item.get('link', ''),
+                            snippet=item.get('text', '')
+                        )
+                    )
+            elif hasattr(results, 'links'):
+                # Some engines only provide links
+                for link in results.links():
+                    search_results.append(
+                        SearchResult(
+                            title='',
+                            url=link,
+                            snippet=''
+                        )
+                    )
+            
+            # Limit number of results if needed
+            return search_results[:self.max_results_per_engine]
+            
         except Exception as e:
-            logger.error(f"Error setting up {engine_name} search: {str(e)}")
-            logger.debug(traceback.format_exc())
-            return None
+            logger.error(f"Error executing search on {engine_name}: {str(e)}")
+            return []
     
-    def execute_multiple_searches(self, 
-                                 queries: Dict[str, str],
-                                 engines: List[str],
-                                 pages: int = 1,
-                                 ignore_duplicates: bool = True) -> Dict[str, Any]:
+    def execute_multiple_searches(
+        self,
+        queries: List[SearchQuery],
+        engines: Optional[List[str]] = None,
+        filter_duplicates: bool = True
+    ) -> Dict[str, Dict[str, List[SearchResult]]]:
         """
-        Execute multiple different search queries concurrently.
+        Execute multiple search queries across specified engines.
         
         Args:
-            queries: Dictionary mapping engine names to search queries
-            engines: List of available search engines to use
-            pages: Number of result pages to retrieve
-            ignore_duplicates: Whether to ignore duplicate URLs
+            queries: List of SearchQuery objects to execute
+            engines: List of search engines to use, or None for default engines
+            filter_duplicates: Whether to filter duplicate results
             
         Returns:
-            Dict mapping engine names to their search results
+            Dict mapping query identifiers to engine results
         """
-        engine_results = {}
+        engines = engines or settings.DEFAULT_SEARCH_ENGINES
+        threads = min(self.max_workers, len(queries))
         
-        logger.info(f"Starting concurrent multi-query search with {len(queries)} queries")
+        logger.info(f"Starting concurrent multi-query search: {len(queries)} queries, {len(engines)} engines")
         
-        # Use ThreadPoolExecutor to run searches in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(queries))) as executor:
-            # Submit all search tasks with the specified queries per engine
-            future_to_engine = {}
+        # Track results for each query
+        query_results: Dict[str, Dict[str, List[SearchResult]]] = {}
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            # Create a thread-safe queue of queries to process
+            query_queue = queue.Queue()
+            for query in queries:
+                query_queue.put(query)
             
-            # Assign each query to an engine, fallback to the first engine if not enough engines
-            for i, (engine_key, query) in enumerate(queries.items()):
-                engine_name = engines[i % len(engines)] if i < len(engines) else engines[0]
-                
+            # Submit search tasks for each query
+            futures = []
+            for _ in range(threads):
                 future = executor.submit(
-                    self._search_with_engine, 
-                    engine_name, 
-                    query, 
-                    pages, 
-                    ignore_duplicates
+                    self._worker_search_query,
+                    query_queue,
+                    query_results,
+                    engines,
+                    filter_duplicates
                 )
-                
-                future_to_engine[future] = (engine_key, engine_name)
+                futures.append(future)
             
-            # Process results as they complete
-            for future in concurrent.futures.as_completed(future_to_engine):
-                engine_key, engine_name = future_to_engine[future]
+            # Wait for all tasks to complete
+            for future in futures:
                 try:
-                    result = future.result()
-                    if result:
-                        with self.result_lock:
-                            engine_results[engine_key] = result
-                            
+                    future.result()
                 except Exception as e:
-                    logger.error(f"Error in concurrent search for {engine_key} using {engine_name}: {str(e)}")
-                    logger.debug(traceback.format_exc())
+                    logger.error(f"Error in query worker thread: {str(e)}")
         
-        logger.info(f"Completed concurrent multi-query search, got {len(engine_results)} results")
-        return engine_results 
+        return query_results
+    
+    def _worker_search_query(
+        self,
+        query_queue: queue.Queue,
+        results: Dict[str, Dict[str, List[SearchResult]]],
+        engines: List[str],
+        filter_duplicates: bool
+    ):
+        """
+        Worker thread function that processes queries from the queue.
+        
+        Args:
+            query_queue: Queue of queries to process
+            results: Dict to store search results (thread-safe with lock)
+            engines: List of search engines to use
+            filter_duplicates: Whether to filter duplicate results
+        """
+        while not query_queue.empty():
+            try:
+                # Get the next query to process
+                query = query_queue.get_nowait()
+                
+                # Execute search for this query
+                logger.debug(f"Thread executing search for query: {query.query}")
+                start_time = time.time()
+                
+                try:
+                    query_result = self.execute_search(query, engines, filter_duplicates)
+                    
+                    # Store results (thread-safe)
+                    with self._result_lock:
+                        # Use query string as key
+                        results[query.query] = query_result
+                    
+                    end_time = time.time()
+                    logger.info(f"Query '{query.query}' completed in {end_time - start_time:.2f}s")
+                    
+                except Exception as e:
+                    logger.error(f"Error during search for query '{query.query}': {str(e)}")
+                
+                # Mark this task as done
+                query_queue.task_done()
+                
+            except queue.Empty:
+                # No more queries to process
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in query worker: {str(e)}")
+    
+    def get_estimated_execution_time(self, num_engines: int, num_queries: int = 1) -> float:
+        """
+        Estimate the execution time for a search across multiple engines.
+        
+        Args:
+            num_engines: Number of engines to search
+            num_queries: Number of queries to execute
+            
+        Returns:
+            Estimated execution time in seconds
+        """
+        avg_delay = (self.throttler.min_delay + self.throttler.max_delay) / 2 if self.throttler.use_random_delays else self.throttler.min_delay
+        avg_search_time = 2.0  # Assume average search takes 2 seconds
+        
+        # With concurrent execution, divide by number of workers
+        effective_workers = min(self.max_workers, num_engines)
+        
+        # For multiple queries, consider the queue processing time
+        if num_queries > 1:
+            effective_workers = min(self.max_workers, num_queries)
+            return (num_queries * num_engines * (avg_delay + avg_search_time)) / effective_workers
+        else:
+            return (num_engines * (avg_delay + avg_search_time)) / effective_workers 

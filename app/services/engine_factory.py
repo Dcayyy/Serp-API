@@ -1,28 +1,41 @@
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import logging
 from search_engines import Google, Bing, Yahoo, Duckduckgo
 from search_engines.multiple_search_engines import MultipleSearchEngines
 
 from app.core.config import settings
 from app.utils.user_agent_manager import UserAgentManager
-from app.services.custom_engines import CUSTOM_ENGINE_MAPPING
+from app.schemas.search import SearchResult
 
 logger = logging.getLogger(__name__)
 
-# Engine mapping for easier instantiation
-ENGINE_MAPPING = CUSTOM_ENGINE_MAPPING if settings.USE_USER_AGENT_ROTATION else {
-    "google": Google,
-    "bing": Bing,
-    "yahoo": Yahoo,
-    "duckduckgo": Duckduckgo
-}
+# Try to import custom engines, but gracefully handle import errors
+try:
+    from app.services.custom_engines import CUSTOM_ENGINE_MAPPING
+    CUSTOM_ENGINES_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Could not import custom engines: {str(e)}")
+    logger.warning("Falling back to standard search engine implementations")
+    CUSTOM_ENGINES_AVAILABLE = False
+    CUSTOM_ENGINE_MAPPING = {}
 
-logger.info(f"Using {'custom' if settings.USE_USER_AGENT_ROTATION else 'standard'} search engine implementations")
+# Engine mapping for easier instantiation - use custom engines if available and enabled
+if CUSTOM_ENGINES_AVAILABLE and settings.USE_USER_AGENT_ROTATION:
+    ENGINE_MAPPING = CUSTOM_ENGINE_MAPPING
+    logger.info("Using custom search engine implementations with user agent rotation")
+else:
+    ENGINE_MAPPING = {
+        "google": Google,
+        "bing": Bing,
+        "yahoo": Yahoo,
+        "duckduckgo": Duckduckgo
+    }
+    logger.info("Using standard search engine implementations")
 
-class EngineFactory:
+class SearchEngineFactory:
     """Factory class for creating search engine instances."""
     
-    def __init__(self, proxy: Optional[str] = None, timeout: int = 30):
+    def __init__(self, proxy: Optional[str] = None, timeout: int = settings.SEARCH_TIMEOUT):
         """
         Initialize the engine factory.
         
@@ -30,19 +43,19 @@ class EngineFactory:
             proxy: Proxy URL to use (if any)
             timeout: Request timeout in seconds
         """
-        self.proxy = proxy
+        self.proxy = proxy or settings.PROXY_URL if settings.USE_PROXY else None
         self.timeout = timeout
         
         # Initialize user agent manager if rotation is enabled
         self.user_agent_manager = UserAgentManager() if settings.USE_USER_AGENT_ROTATION else None
         
-        logger.debug(f"EngineFactory initialized with proxy: {proxy or 'None'}, timeout: {timeout}s")
+        logger.debug(f"SearchEngineFactory initialized with proxy: {self.proxy or 'None'}, timeout: {timeout}s")
         if self.user_agent_manager:
             logger.debug("User agent rotation is enabled")
     
-    def create_engine(self, engine_name: str):
+    def get_engine(self, engine_name: str):
         """
-        Create a search engine instance by name.
+        Get a search engine instance by name.
         
         Args:
             engine_name: Name of the search engine to create
@@ -71,7 +84,7 @@ class EngineFactory:
         
         return engine
     
-    def create_multi_engine(self, engines, ignore_duplicates: bool = True):
+    def get_multi_engine(self, engines, ignore_duplicates: bool = True):
         """
         Create a MultipleSearchEngines instance.
         
@@ -97,6 +110,15 @@ class EngineFactory:
             multi_engine = self._set_user_agent(multi_engine, user_agent, "multi_engine")
         
         return multi_engine
+    
+    def get_supported_engines(self) -> List[str]:
+        """
+        Get a list of all supported search engine names.
+        
+        Returns:
+            List of engine names
+        """
+        return list(ENGINE_MAPPING.keys())
     
     def _set_user_agent(self, engine, user_agent: str, engine_name: str):
         """
