@@ -93,7 +93,6 @@ class ProxyManager:
                     
                 # Update stats and return the proxy
                 self._update_proxy_stats(proxy, increment=True)
-                logger.info(f"Selected proxy {proxy} for engine {preferred_engine} (attempt {attempts}/{max_attempts})")
                 return proxy
                 
             # If we've tried all proxies and none are available,

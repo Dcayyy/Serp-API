@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from typing import Optional, List
 import logging
+import random
 
 from app.schemas.search import CompanySearchRequest, SearchResponse
 from app.services.search_service import SearchService
@@ -28,7 +29,7 @@ async def search_by_company_name(
     Results from both searches are aggregated and returned in a unified format.
     
     - **company_name**: Company name to search for (required)
-    - **engines**: Optional list of search engines to use (defaults to all available, but only the first 2 will be used)
+    - **engines**: Optional list of search engines to use (defaults to all available, but only 2 randomly selected engines will be used)
     - **pages**: Number of result pages to retrieve (default: 1)
     - **ignore_duplicates**: Whether to ignore duplicate URLs in results (default: true)
     - **use_proxy**: Whether to use a proxy for search requests (default: false)
@@ -39,7 +40,15 @@ async def search_by_company_name(
         logger.info(f"Company search request received for: {request.company_name}")
         
         # Use specified engines or default ones
-        engines = request.engines or settings.DEFAULT_SEARCH_ENGINES
+        available_engines = request.engines or settings.DEFAULT_SEARCH_ENGINES
+        
+        # Randomly select only 2 engines regardless of how many are available
+        selected_engines = random.sample(
+            available_engines, 
+            min(2, len(available_engines))  # Ensure we don't try to sample more than available
+        )
+        
+        logger.info(f"Randomly selected engines for this request: {selected_engines}")
         
         # Create search service with concurrent execution
         search_service = SearchService(
@@ -48,10 +57,10 @@ async def search_by_company_name(
             max_workers=settings.MAX_CONCURRENT_SEARCHES
         )
         
-        # Perform the search
+        # Perform the search with only the selected engines
         results = search_service.execute_company_search(
             company_name=request.company_name,
-            engines=engines,
+            engines=selected_engines,
             page=min(request.pages, settings.MAX_SEARCH_PAGES),
             filter_duplicates=request.ignore_duplicates
         )
