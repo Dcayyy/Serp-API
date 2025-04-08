@@ -27,73 +27,84 @@ class SearchService:
     def __init__(
         self,
         proxy: Optional[str] = None,
-        proxy_manager: Optional[ProxyManager] = None,
-        timeout: int = settings.SEARCH_TIMEOUT,
         use_concurrent: bool = True,
         max_workers: int = settings.MAX_CONCURRENT_SEARCHES,
+        max_results_per_engine: int = settings.SEARCH_RESULTS_LIMIT
     ):
         """
         Initialize the search service.
         
         Args:
-            proxy: Proxy URL to use for requests (if not using proxy rotation)
-            proxy_manager: ProxyManager for proxy rotation (created if None)
-            timeout: Request timeout in seconds
-            use_concurrent: Whether to use concurrent execution (default: True)
-            max_workers: Maximum number of concurrent workers (default: 10)
+            proxy: Optional proxy URL to use for requests
+            use_concurrent: Whether to use concurrent execution
+            max_workers: Maximum number of concurrent workers
+            max_results_per_engine: Maximum number of results to return per engine
         """
-        self.timeout = timeout
+        self.proxy = proxy
         self.use_concurrent = use_concurrent
         self.max_workers = max_workers
+        self.max_results_per_engine = max_results_per_engine
         
-        # Set up proxy management
-        self.proxy_manager = proxy_manager or ProxyManager([proxy] if proxy else None)
-        self.fixed_proxy = proxy
-
-        # Ensure output directory exists
-        os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+        # Create the search engine factory
+        self.engine_factory = SearchEngineFactory(proxy=proxy)
         
-        # Create engine factory with proxy callback
-        self.engine_factory = SearchEngineFactory(
-            proxy=self.fixed_proxy,
-            proxy_manager=self.proxy_manager,
-            timeout=timeout,
-            get_proxy_callback=self.get_proxy_for_engine
-        )
-        
-        # Create throttler with engine-specific delays
-        throttler = RequestThrottler(
+        # Create rate limiter for API requests
+        self.throttler = RequestThrottler(
             min_delay=settings.MIN_REQUEST_DELAY,
             max_delay=settings.MAX_REQUEST_DELAY,
-            use_random_delays=settings.USE_RANDOM_DELAYS,
-            engine_specific_delays=settings.ENGINE_SPECIFIC_DELAYS
+            use_random_delays=settings.USE_RANDOM_DELAYS
         )
         
-        # Create search executor
-        logger.info(f"Initializing search service with{'out' if not use_concurrent else ''} concurrent execution")
+        # Create result processor
+        self.result_processor = ResultProcessor()
+        
+        # Create executor based on configuration
         if use_concurrent:
-            logger.info(f"Using concurrent search executor with {max_workers} workers")
-            self.search_executor = ConcurrentSearchExecutor(
-                engine_factory=self.engine_factory, 
-                throttler=throttler,
-                max_workers=max_workers
+            self.executor = ConcurrentSearchExecutor(
+                engine_factory=self.engine_factory,
+                throttler=self.throttler,
+                max_workers=max_workers,
+                max_results_per_engine=max_results_per_engine
             )
         else:
-            logger.info(f"Using sequential search executor")
-            self.search_executor = SearchExecutor(
+            self.executor = SearchExecutor(
                 engine_factory=self.engine_factory,
-                throttler=throttler
+                throttler=self.throttler,
+                max_results_per_engine=max_results_per_engine
             )
+            
+        logger.debug(f"Search service initialized with proxy={proxy}, concurrent={use_concurrent}")
         
-        # Initialize result processor
-        self.result_processor = ResultProcessor(instance_id=settings.INSTANCE_ID)
+    def set_proxy(self, proxy_url: Optional[str]):
+        """
+        Change the proxy settings for the search service.
         
-        # Initialize strategies
-        self.domain_strategy = DomainSearchStrategy(self.search_executor, self.result_processor)
-        self.company_strategy = CompanySearchStrategy(self.search_executor, self.result_processor)
-        self.full_strategy = FullSearchStrategy(self.search_executor, self.result_processor)
+        Args:
+            proxy_url: New proxy URL to use, or None to disable
+        """
+        if self.proxy == proxy_url:
+            return  # No change needed
+            
+        logger.debug(f"Updating search service proxy to: {proxy_url}")
+        self.proxy = proxy_url
         
-        logger.debug(f"SearchService initialized with proxy manager ({len(self.proxy_manager.proxies)} proxies), timeout: {timeout}s")
+        # Update the engine factory with the new proxy
+        self.engine_factory = SearchEngineFactory(proxy=proxy_url)
+        
+        # Update the executor with the new engine factory
+        if self.use_concurrent:
+            self.executor = ConcurrentSearchExecutor(
+                engine_factory=self.engine_factory,
+                throttler=self.throttler,
+                max_workers=self.max_workers,
+                max_results_per_engine=self.max_results_per_engine
+            )
+        else:
+            self.executor = SearchExecutor(
+                engine_factory=self.engine_factory,
+                throttler=self.throttler,
+                max_results_per_engine=self.max_results_per_engine
+            )
     
     def get_proxy_for_engine(self, engine_name: str) -> Optional[str]:
         """
@@ -106,8 +117,8 @@ class SearchService:
             Proxy URL or None if no proxies available
         """
         # If using a fixed proxy, return that
-        if self.fixed_proxy:
-            return self.fixed_proxy
+        if self.proxy:
+            return self.proxy
             
         # Otherwise, get a proxy from the rotation
         return self.proxy_manager.get_proxy(preferred_engine=engine_name)
@@ -179,7 +190,7 @@ class SearchService:
         )
         
         # Execute the search
-        return self.search_executor.execute_search(
+        return self.executor.execute_search(
             query=search_query,
             engines=engines,
             filter_duplicates=filter_duplicates
@@ -191,19 +202,23 @@ class SearchService:
         engines: Optional[List[str]] = None,
         page: int = 1,
         filter_duplicates: bool = True,
+        search_type_to_engine: Optional[Dict[str, List[str]]] = None
     ) -> Dict[str, Dict[str, List[SearchResult]]]:
         """
         Execute a company search strategy with multiple queries.
         
-        This method performs two different searches concurrently:
-        1. A direct search for the company name
-        2. A search for the company website using "site:" operator
+        This method performs two different searches:
+        1. A direct search for the company name on the first engine
+        2. A search for the company website using "site:" operator on the second engine
+        
+        Each engine is assigned a specific query type to search for.
         
         Args:
             company_name: Company name to search for
             engines: List of engine names to use, or None for default engines
             page: Page number for search results
             filter_duplicates: Whether to filter duplicate results
+            search_type_to_engine: Optional mapping of search types to specific engines
             
         Returns:
             Dictionary mapping query types to search results by engine
@@ -211,40 +226,56 @@ class SearchService:
         engines = engines or settings.DEFAULT_SEARCH_ENGINES
         logger.info(f"Executing company search for '{company_name}'")
         
-        # Create multiple search queries
-        queries = [
-            SearchQuery(
-                query=company_name,
-                page=page
-            ),
-            SearchQuery(
-                query=f"site:{company_name}.com",
-                page=page
-            )
-        ]
+        # Determine which engines to use for each search type
+        name_engines = []
+        website_engines = []
         
-        # Execute both searches (concurrently if supported)
-        if hasattr(self.search_executor, 'execute_multiple_searches'):
-            logger.debug("Using concurrent multi-query search")
-            results = self.search_executor.execute_multiple_searches(
-                queries=queries,
-                engines=engines,
+        if search_type_to_engine:
+            # Use the provided mapping
+            name_engines = search_type_to_engine.get("company_name", [engines[0] if engines else None])
+            website_engines = search_type_to_engine.get("company_website", [engines[1] if len(engines) > 1 else engines[0]])
+            logger.info(f"Using custom engine allocation: name search -> {name_engines}, website search -> {website_engines}")
+        else:
+            # Default allocation: first engine for name search, second for website search
+            if engines:
+                name_engines = [engines[0]]
+                website_engines = [engines[1] if len(engines) > 1 else engines[0]]
+                logger.info(f"Using default engine allocation: name search -> {name_engines}, website search -> {website_engines}")
+        
+        # Create search queries
+        name_query = SearchQuery(
+            query=company_name,
+            page=page
+        )
+        
+        website_query = SearchQuery(
+            query=f"site:{company_name}.com",
+            page=page
+        )
+        
+        # Execute company name search on the first engine
+        name_results = {}
+        if name_engines:
+            logger.debug(f"Executing company name search on engines: {name_engines}")
+            name_results = self.executor.execute_search(
+                query=name_query,
+                engines=name_engines,
                 filter_duplicates=filter_duplicates
             )
-        else:
-            # Fall back to sequential execution
-            logger.debug("Using sequential multi-query search")
-            results = {}
-            for query in queries:
-                results[query.query] = self.search_executor.execute_search(
-                    query=query,
-                    engines=engines,
-                    filter_duplicates=filter_duplicates
-                )
+        
+        # Execute company website search on the second engine
+        website_results = {}
+        if website_engines:
+            logger.debug(f"Executing company website search on engines: {website_engines}")
+            website_results = self.executor.execute_search(
+                query=website_query,
+                engines=website_engines,
+                filter_duplicates=filter_duplicates
+            )
         
         return {
-            "company_name": results.get(company_name, {}),
-            "company_site": results.get(f"site:{company_name}.com", {})
+            "company_name": name_results,
+            "company_website": website_results
         }
     
     def search_by_domain(self, domain: str, pages: int = 1, ignore_duplicates: bool = True) -> Dict[str, Any]:

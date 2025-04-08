@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
-from typing import Optional, List
+from typing import Optional, List, Dict
 import logging
 import random
 
@@ -13,20 +13,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Create the search service once when the app starts
+search_service = SearchService(
+    proxy=settings.PROXY_URL if settings.USE_PROXY else None,
+    use_concurrent=settings.USE_CONCURRENT_SEARCH,
+    max_workers=settings.MAX_CONCURRENT_SEARCHES
+)
+
+# Dependency to get the search service
+def get_search_service():
+    return search_service
+
 
 @router.post("/by-company-name", response_model=SearchResponse, summary="Search by company name")
 async def search_by_company_name(
     request: CompanySearchRequest,
     background_tasks: BackgroundTasks,
+    service: SearchService = Depends(get_search_service),
 ):
     """
     Perform a search for a company name across multiple search engines.
     
-    This endpoint accepts a company name and performs two strategic searches concurrently:
+    This endpoint accepts a company name and performs two strategic searches:
     1. A general search for the company using the first engine with a query optimized to find company information
-    2. A search specifically for the company's official website using the second engine (if available)
+    2. A search specifically for the company's official website using the second engine
     
-    Results from both searches are aggregated and returned in a unified format.
+    Each search type is assigned to a different engine, for a total of 2 searches per API call.
     
     - **company_name**: Company name to search for (required)
     - **engines**: Optional list of search engines to use (defaults to all available, but only 2 randomly selected engines will be used)
@@ -48,21 +60,29 @@ async def search_by_company_name(
             min(2, len(available_engines))  # Ensure we don't try to sample more than available
         )
         
-        logger.info(f"Randomly selected engines for this request: {selected_engines}")
+        # Create a mapping for search types to engines
+        # First engine for company name search, second engine for website search
+        search_type_to_engine: Dict[str, List[str]] = {
+            "company_name": [selected_engines[0]],
+            "company_website": [selected_engines[1]] if len(selected_engines) > 1 else [selected_engines[0]]
+        }
         
-        # Create search service with concurrent execution
-        search_service = SearchService(
-            proxy=settings.PROXY_URL if request.use_proxy or settings.USE_PROXY else None,
-            use_concurrent=settings.USE_CONCURRENT_SEARCH,
-            max_workers=settings.MAX_CONCURRENT_SEARCHES
-        )
+        logger.info(f"Search allocation: company_name -> {search_type_to_engine['company_name'][0]}, " 
+                   f"company_website -> {search_type_to_engine['company_website'][0]}")
         
-        # Perform the search with only the selected engines
-        results = search_service.execute_company_search(
+        # Use the injected search service, update proxy if needed for this specific request
+        if request.use_proxy and not settings.USE_PROXY:
+            service.set_proxy(settings.PROXY_URL)
+        elif not request.use_proxy and settings.USE_PROXY:
+            service.set_proxy(None)
+        
+        # Perform the search with the allocated engines for each search type
+        results = service.execute_company_search(
             company_name=request.company_name,
             engines=selected_engines,
             page=min(request.pages, settings.MAX_SEARCH_PAGES),
-            filter_duplicates=request.ignore_duplicates
+            filter_duplicates=request.ignore_duplicates,
+            search_type_to_engine=search_type_to_engine
         )
         
         # Convert results to JSON-serializable format
