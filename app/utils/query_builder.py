@@ -151,6 +151,23 @@ def build_company_search_query(company_name: str) -> str:
     return f'{base_query} ({extended_query})'
 
 
+def build_company_website_query(company_name: str) -> str:
+    """
+    Build a search query specifically to find a company's official website.
+    
+    Args:
+        company_name: The company name to search for
+        
+    Returns:
+        Formatted search query string
+    """
+    # Clean company name
+    clean_name = company_name.strip()
+    
+    # Build query to find company's official website
+    return f'"{clean_name}" official website'
+
+
 def build_email_pattern_query(name_parts: List[str], domain: str) -> str:
     """
     Build a search query to find email patterns for a company.

@@ -12,7 +12,8 @@ from app.core.config import settings
 from app.utils.query_builder import (
     build_domain_query,
     build_full_search_query,
-    build_company_search_query
+    build_company_search_query,
+    build_company_website_query
 )
 
 logger = logging.getLogger(__name__)
@@ -87,19 +88,19 @@ class SearchService:
         # Process individual engine results
         for engine_name, results in engine_results.items():
             try:
-                titles = results.titles()
-                links = results.links()
-                texts = results.text()
+                titles = results.titles() if hasattr(results, 'titles') else []
+                links = results.links() if hasattr(results, 'links') else []
+                texts = results.text() if hasattr(results, 'text') else []
                 
                 logger.debug(f"{engine_name} returned {len(links)} links")
                 
                 engine_result_items = []
                 for i in range(min(len(links), settings.SEARCH_RESULTS_LIMIT)):
-                    if i < len(links):
+                    if i < len(links) and i < len(titles) and i < len(texts):
                         item = {
-                            "title": titles[i] if i < len(titles) else "No title",
+                            "title": titles[i] if titles[i] else "No title",
                             "url": links[i],
-                            "description": texts[i] if i < len(texts) else "No description"
+                            "description": texts[i] if texts[i] else "No description"
                         }
                         engine_result_items.append(item)
                         
@@ -115,13 +116,16 @@ class SearchService:
                 
                 total_count += len(links)
                 
-                # Save raw results for debugging
+                # Save raw results for debugging only if output method exists
                 try:
-                    output_dir = f"{settings.OUTPUT_DIR}/debug"
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_file = f"{output_dir}/{engine_name}_{timestamp}"
-                    results.output("json", output_file)
-                    logger.debug(f"Saved raw {engine_name} results to {output_file}.json")
+                    if hasattr(results, 'output'):
+                        output_dir = f"{settings.OUTPUT_DIR}/debug"
+                        os.makedirs(output_dir, exist_ok=True)
+                        output_file = f"{output_dir}/{engine_name}_{timestamp}"
+                        results.output("json", output_file)
+                        logger.debug(f"Saved raw {engine_name} results to {output_file}.json")
+                    else:
+                        logger.debug(f"{engine_name} results don't have output method, skipping debug save")
                 except Exception as e:
                     logger.warning(f"Could not save debug output for {engine_name}: {e}")
                     
@@ -195,19 +199,157 @@ class SearchService:
         """
         Search for a company name across multiple search engines.
         
+        This method performs two different searches:
+        1. A generic search for the company name
+        2. A search specifically for the company's official website
+        
+        Results from both searches are aggregated.
+        
         Args:
             company_name: The company name to search for
             pages: Number of result pages to retrieve
             ignore_duplicates: Whether to ignore duplicate URLs
             
         Returns:
-            Dict containing search results in structured format
+            Dict containing aggregated search results in structured format
         """
-        query = build_company_search_query(company_name)
         logger.info(f"Performing company search for {company_name}")
-        logger.debug(f"Generated query: {query}")
         
-        return self._perform_search(query, pages, ignore_duplicates)
+        # Use only up to 2 search engines as specified
+        engines_to_use = self.engines[:2] if len(self.engines) > 2 else self.engines
+        results_combined = {}
+        
+        # 1. First search: regular company search
+        query1 = build_company_search_query(company_name)
+        logger.debug(f"Query 1: {query1}")
+        
+        # First search handling with better error handling
+        if engines_to_use:
+            engine1 = engines_to_use[0]
+            logger.info(f"Using {engine1} for the first search")
+            
+            try:
+                engine_instance = self._create_engine_instance(engine1)
+                engine_instance.ignore_duplicate_urls = ignore_duplicates
+                
+                # Execute search
+                logger.debug(f"Executing {engine1} search for: {query1}")
+                start_time = time.time()
+                engine_instance.search(query1, pages)
+                end_time = time.time()
+                
+                # Store results with extra validation for Google
+                results = engine_instance.results
+                
+                # Add extra validation for Google which can sometimes have index issues
+                if engine1 == 'google':
+                    try:
+                        # Validate results before processing
+                        print(results)
+                        titles = results.titles() if hasattr(results, 'titles') else []
+                        links = results.links() if hasattr(results, 'links') else []
+                        texts = results.text() if hasattr(results, 'text') else []
+                        
+                        # Ensure all arrays have the same length to prevent index errors
+                        min_length = min(len(titles), len(links), len(texts))
+                        logger.debug(f"{engine1} result lengths - titles: {len(titles)}, links: {len(links)}, texts: {len(texts)}")
+                        
+                        if min_length > 0:
+                            logger.info(f"{engine1} search completed in {end_time - start_time:.2f}s, found {min_length} valid results")
+                            results_combined[engine1] = results
+                        else:
+                            logger.warning(f"{engine1} search returned no valid results")
+                    except Exception as e:
+                        logger.error(f"Error validating {engine1} results: {str(e)}")
+                        logger.debug(traceback.format_exc())
+                else:
+                    # For other engines, proceed as normal
+                    links = results.links() if hasattr(results, 'links') else []
+                    logger.info(f"{engine1} search completed in {end_time - start_time:.2f}s, found {len(links)} results")
+                    results_combined[engine1] = results
+                
+                # Add delay between searches
+                delay = 2  # 2 seconds between searches
+                logger.debug(f"Waiting {delay}s before second search")
+                time.sleep(delay)
+                
+            except Exception as e:
+                logger.error(f"Error searching with {engine1}: {str(e)}")
+                logger.debug(traceback.format_exc())
+        
+        # 2. Second search: official website search with different engine if available
+        query2 = build_company_website_query(company_name)
+        logger.debug(f"Query 2: {query2}")
+        
+        # Select second engine for second search
+        if len(engines_to_use) > 1:
+            engine2 = engines_to_use[1]
+            logger.info(f"Using {engine2} for the second search")
+            
+            try:
+                engine_instance = self._create_engine_instance(engine2)
+                engine_instance.ignore_duplicate_urls = ignore_duplicates
+                
+                # Execute search
+                logger.debug(f"Executing {engine2} search for: {query2}")
+                start_time = time.time()
+                engine_instance.search(query2, pages)
+                end_time = time.time()
+                
+                # Store results with extra validation
+                results = engine_instance.results
+                
+                # Add extra validation for Google which can sometimes have index issues
+                if engine2 == 'google':
+                    try:
+                        # Validate results before processing
+                        titles = results.titles() if hasattr(results, 'titles') else []
+                        links = results.links() if hasattr(results, 'links') else []
+                        texts = results.text() if hasattr(results, 'text') else []
+                        
+                        # Ensure all arrays have the same length to prevent index errors
+                        min_length = min(len(titles), len(links), len(texts))
+                        logger.debug(f"{engine2} result lengths - titles: {len(titles)}, links: {len(links)}, texts: {len(texts)}")
+                        
+                        if min_length > 0:
+                            logger.info(f"{engine2} search completed in {end_time - start_time:.2f}s, found {min_length} valid results")
+                            results_combined[engine2] = results
+                        else:
+                            logger.warning(f"{engine2} search returned no valid results")
+                    except Exception as e:
+                        logger.error(f"Error validating {engine2} results: {str(e)}")
+                        logger.debug(traceback.format_exc())
+                else:
+                    # For other engines, proceed as normal
+                    links = results.links() if hasattr(results, 'links') else []
+                    logger.info(f"{engine2} search completed in {end_time - start_time:.2f}s, found {len(links)} results")
+                    results_combined[engine2] = results
+                
+            except Exception as e:
+                logger.error(f"Error searching with {engine2}: {str(e)}")
+                logger.debug(traceback.format_exc())
+        
+        # Process and combine results
+        if not results_combined:
+            logger.warning("No results from any search engine")
+            return {
+                "query": f"{query1} AND {query2}",
+                "results_by_engine": [],
+                "combined_results": [],
+                "total_results": 0,
+                "metadata": {
+                    "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    "instance_id": self.instance_id,
+                    "engines_used": engines_to_use,
+                    "search_time": datetime.now().isoformat(),
+                    "error": "No results from any search engine",
+                    "query": f"{query1} AND {query2}"
+                }
+            }
+        
+        # Process the combined results using a descriptive query
+        combined_query = f"Multiple queries for {company_name}"
+        return self._process_results(results_combined, combined_query)
     
     def _perform_search(self, query: str, pages: int = 1, ignore_duplicates: bool = True) -> Dict[str, Any]:
         """Execute search across all configured engines and process results."""

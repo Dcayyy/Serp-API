@@ -21,13 +21,14 @@ async def search_by_company_name(
     """
     Perform a search for a company name across multiple search engines.
     
-    This endpoint accepts a company name and returns search results from various
-    search engines, including titles, URLs, and descriptions of the results.
-    The search is optimized to find information about the company, its contacts,
-    team members, and related information.
+    This endpoint accepts a company name and performs two strategic searches:
+    1. A general search for the company using the first engine with a query optimized to find company information
+    2. A search specifically for the company's official website using the second engine (if available)
+    
+    Results from both searches are aggregated and returned in a unified format.
     
     - **company_name**: Company name to search for (required)
-    - **engines**: Optional list of search engines to use (defaults to all available)
+    - **engines**: Optional list of search engines to use (defaults to all available, but only the first 2 will be used)
     - **pages**: Number of result pages to retrieve (default: 1)
     - **ignore_duplicates**: Whether to ignore duplicate URLs in results (default: true)
     - **use_proxy**: Whether to use a proxy for search requests (default: false)
