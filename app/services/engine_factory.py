@@ -87,6 +87,7 @@ class SearchEngineFactory:
         
         # Determine which proxy to use for this engine
         proxy = self._get_proxy_for_engine(engine_name)
+        logger.info(f"Using proxy {proxy} for {engine_name} search engine")
         
         # Create engine with proxy and timeout
         engine = engine_class(proxy=proxy, timeout=self.timeout)
@@ -95,6 +96,7 @@ class SearchEngineFactory:
         if self.user_agent_manager:
             user_agent = self.user_agent_manager.get_random_user_agent()
             engine = self._set_user_agent(engine, user_agent, engine_name)
+            logger.debug(f"Set user agent for {engine_name}: {user_agent}")
         
         return engine
     

@@ -35,9 +35,20 @@ class Settings(Settings):
     RATE_LIMIT_PERIOD: int = 60  # seconds
     
     # Proxy settings (can be overridden by environment variables)
-    USE_PROXY: bool = False
+    USE_PROXY: bool = True
     PROXY_URL: str = ""
-    PROXY_URLS: List[str] = []  # List of proxy URLs for rotation
+    PROXY_URLS: List[str] = [
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8001",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8002",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8003",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8004",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8005",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8006",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8007",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8008",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8009",
+        "http://dcayy_5a9PW:1947838QWEss~@isp.oxylabs.io:8010",
+    ]
     
     # Timeout settings
     SEARCH_TIMEOUT: int = 30  # seconds

@@ -60,6 +60,7 @@ class ProxyManager:
             Proxy URL or None if no proxies are available
         """
         if not self.proxies:
+            logger.warning("No proxies available in the pool")
             return None
             
         with self._lock:
@@ -67,6 +68,7 @@ class ProxyManager:
             if len(self.proxies) == 1:
                 proxy = self.proxies[0]
                 self._update_proxy_stats(proxy, increment=True)
+                logger.info(f"Using single proxy: {proxy} for engine: {preferred_engine}")
                 return proxy
                 
             # Find the next available healthy proxy
@@ -86,10 +88,12 @@ class ProxyManager:
                 if (not stats["is_healthy"] or 
                     stats["cooling_until"] > current_time):
                     # Skip this proxy, it's either unhealthy or cooling down
+                    logger.debug(f"Skipping proxy {proxy} - unhealthy or cooling down")
                     continue
                     
                 # Update stats and return the proxy
                 self._update_proxy_stats(proxy, increment=True)
+                logger.info(f"Selected proxy {proxy} for engine {preferred_engine} (attempt {attempts}/{max_attempts})")
                 return proxy
                 
             # If we've tried all proxies and none are available,
@@ -99,6 +103,7 @@ class ProxyManager:
                 key=lambda p: self.proxy_stats[p]["requests"]
             )
             self._update_proxy_stats(least_used_proxy, increment=True)
+            logger.warning(f"All proxies were unavailable, using least used proxy: {least_used_proxy}")
             return least_used_proxy
     
     def mark_proxy_error(self, proxy: str, engine: Optional[str] = None) -> None:
