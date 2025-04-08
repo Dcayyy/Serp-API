@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 import logging
 from search_engines import Google, Bing, Yahoo, Duckduckgo
 from search_engines.multiple_search_engines import MultipleSearchEngines
@@ -6,6 +6,7 @@ from search_engines.multiple_search_engines import MultipleSearchEngines
 from app.core.config import settings
 from app.utils.user_agent_manager import UserAgentManager
 from app.schemas.search import SearchResult
+from app.utils.proxy_manager import ProxyManager
 
 logger = logging.getLogger(__name__)
 
@@ -35,21 +36,31 @@ else:
 class SearchEngineFactory:
     """Factory class for creating search engine instances."""
     
-    def __init__(self, proxy: Optional[str] = None, timeout: int = settings.SEARCH_TIMEOUT):
+    def __init__(
+        self, 
+        proxy: Optional[str] = None,
+        proxy_manager: Optional[ProxyManager] = None, 
+        timeout: int = settings.SEARCH_TIMEOUT,
+        get_proxy_callback: Optional[Callable[[str], Optional[str]]] = None
+    ):
         """
         Initialize the engine factory.
         
         Args:
-            proxy: Proxy URL to use (if any)
+            proxy: Fixed proxy URL to use (if any)
+            proxy_manager: ProxyManager for proxy rotation
             timeout: Request timeout in seconds
+            get_proxy_callback: Optional callback to get a proxy for a specific engine
         """
-        self.proxy = proxy or settings.PROXY_URL if settings.USE_PROXY else None
+        self.fixed_proxy = proxy
+        self.proxy_manager = proxy_manager
         self.timeout = timeout
+        self.get_proxy_callback = get_proxy_callback
         
         # Initialize user agent manager if rotation is enabled
         self.user_agent_manager = UserAgentManager() if settings.USE_USER_AGENT_ROTATION else None
         
-        logger.debug(f"SearchEngineFactory initialized with proxy: {self.proxy or 'None'}, timeout: {timeout}s")
+        logger.debug(f"SearchEngineFactory initialized with proxy: {proxy or 'proxy manager' if proxy_manager else 'None'}, timeout: {timeout}s")
         if self.user_agent_manager:
             logger.debug("User agent rotation is enabled")
     
@@ -74,8 +85,11 @@ class SearchEngineFactory:
         
         engine_class = ENGINE_MAPPING[engine_name]
         
+        # Determine which proxy to use for this engine
+        proxy = self._get_proxy_for_engine(engine_name)
+        
         # Create engine with proxy and timeout
-        engine = engine_class(proxy=self.proxy, timeout=self.timeout)
+        engine = engine_class(proxy=proxy, timeout=self.timeout)
         
         # Set user agent if rotation is enabled
         if self.user_agent_manager:
@@ -97,9 +111,15 @@ class SearchEngineFactory:
         """
         logger.debug(f"Creating MultipleSearchEngines instance with: {engines}")
         
+        # For multi-engine, we use the fixed proxy if available
+        # or the first proxy from the manager
+        proxy = self.fixed_proxy
+        if not proxy and self.proxy_manager and self.proxy_manager.proxies:
+            proxy = self.proxy_manager.proxies[0]
+        
         multi_engine = MultipleSearchEngines(
             engines, 
-            proxy=self.proxy,
+            proxy=proxy,
             timeout=self.timeout,
             ignore_duplicate_urls=ignore_duplicates
         )
@@ -119,6 +139,38 @@ class SearchEngineFactory:
             List of engine names
         """
         return list(ENGINE_MAPPING.keys())
+    
+    def _get_proxy_for_engine(self, engine_name: str) -> Optional[str]:
+        """
+        Get the appropriate proxy for a specific search engine.
+        
+        Args:
+            engine_name: Name of the search engine
+            
+        Returns:
+            Proxy URL or None
+        """
+        # If we have a fixed proxy, always use that
+        if self.fixed_proxy:
+            return self.fixed_proxy
+            
+        # If we have a callback, use that to get a proxy
+        if self.get_proxy_callback:
+            proxy = self.get_proxy_callback(engine_name)
+            if proxy:
+                return proxy
+                
+        # If we have a proxy manager, get a proxy from it
+        if self.proxy_manager:
+            proxy = self.proxy_manager.get_proxy(preferred_engine=engine_name)
+            if proxy:
+                return proxy
+                
+        # Fall back to the proxy from settings if enabled
+        if settings.USE_PROXY and settings.PROXY_URL:
+            return settings.PROXY_URL
+            
+        return None
     
     def _set_user_agent(self, engine, user_agent: str, engine_name: str):
         """

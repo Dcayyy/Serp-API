@@ -12,6 +12,8 @@ from app.services.strategies.company_search import CompanySearchStrategy
 from app.services.strategies.domain_search import DomainSearchStrategy
 from app.services.strategies.full_search import FullSearchStrategy
 from app.schemas.search import SearchQuery, SearchResult
+from app.utils.proxy_manager import ProxyManager
+from app.utils.throttle import RequestThrottler
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ class SearchService:
     def __init__(
         self,
         proxy: Optional[str] = None,
+        proxy_manager: Optional[ProxyManager] = None,
         timeout: int = settings.SEARCH_TIMEOUT,
         use_concurrent: bool = True,
         max_workers: int = settings.MAX_CONCURRENT_SEARCHES,
@@ -33,42 +36,107 @@ class SearchService:
         Initialize the search service.
         
         Args:
-            proxy: Proxy URL to use for requests
+            proxy: Proxy URL to use for requests (if not using proxy rotation)
+            proxy_manager: ProxyManager for proxy rotation (created if None)
             timeout: Request timeout in seconds
             use_concurrent: Whether to use concurrent execution (default: True)
-            max_workers: Maximum number of concurrent workers (default: 5)
+            max_workers: Maximum number of concurrent workers (default: 10)
         """
-        self.proxy = proxy
         self.timeout = timeout
         self.use_concurrent = use_concurrent
         self.max_workers = max_workers
         
+        # Set up proxy management
+        self.proxy_manager = proxy_manager or ProxyManager([proxy] if proxy else None)
+        self.fixed_proxy = proxy
+
         # Ensure output directory exists
         os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
         
-        # Create engine factory
-        self.engine_factory = SearchEngineFactory(proxy=self.proxy, timeout=timeout)
+        # Create engine factory with proxy callback
+        self.engine_factory = SearchEngineFactory(
+            proxy=self.fixed_proxy,
+            proxy_manager=self.proxy_manager,
+            timeout=timeout,
+            get_proxy_callback=self.get_proxy_for_engine
+        )
+        
+        # Create throttler with engine-specific delays
+        throttler = RequestThrottler(
+            min_delay=settings.MIN_REQUEST_DELAY,
+            max_delay=settings.MAX_REQUEST_DELAY,
+            use_random_delays=settings.USE_RANDOM_DELAYS,
+            engine_specific_delays=settings.ENGINE_SPECIFIC_DELAYS
+        )
         
         # Create search executor
         logger.info(f"Initializing search service with{'out' if not use_concurrent else ''} concurrent execution")
         if use_concurrent:
             logger.info(f"Using concurrent search executor with {max_workers} workers")
             self.search_executor = ConcurrentSearchExecutor(
-                self.engine_factory, 
+                engine_factory=self.engine_factory, 
+                throttler=throttler,
                 max_workers=max_workers
             )
         else:
             logger.info(f"Using sequential search executor")
-            self.search_executor = SearchExecutor(self.engine_factory)
+            self.search_executor = SearchExecutor(
+                engine_factory=self.engine_factory,
+                throttler=throttler
+            )
         
+        # Initialize result processor
         self.result_processor = ResultProcessor(instance_id=settings.INSTANCE_ID)
         
         # Initialize strategies
-        self.company_strategy = CompanySearchStrategy(self.search_executor, self.result_processor)
         self.domain_strategy = DomainSearchStrategy(self.search_executor, self.result_processor)
+        self.company_strategy = CompanySearchStrategy(self.search_executor, self.result_processor)
         self.full_strategy = FullSearchStrategy(self.search_executor, self.result_processor)
         
-        logger.debug(f"SearchService initialized with proxy: {proxy or 'None'}, timeout: {timeout}s")
+        logger.debug(f"SearchService initialized with proxy manager ({len(self.proxy_manager.proxies)} proxies), timeout: {timeout}s")
+    
+    def get_proxy_for_engine(self, engine_name: str) -> Optional[str]:
+        """
+        Get an appropriate proxy for the specific search engine.
+        
+        Args:
+            engine_name: The search engine name
+            
+        Returns:
+            Proxy URL or None if no proxies available
+        """
+        # If using a fixed proxy, return that
+        if self.fixed_proxy:
+            return self.fixed_proxy
+            
+        # Otherwise, get a proxy from the rotation
+        return self.proxy_manager.get_proxy(preferred_engine=engine_name)
+    
+    def handle_request_error(self, proxy: str, engine_name: str, error: Exception) -> None:
+        """
+        Handle a request error that might be due to rate limiting.
+        
+        Args:
+            proxy: The proxy that was used
+            engine_name: The search engine that was queried
+            error: The exception that occurred
+        """
+        logger.warning(f"Error with {engine_name} using proxy {proxy}: {str(error)}")
+        
+        # Mark the proxy as having an error
+        if proxy and self.proxy_manager:
+            self.proxy_manager.mark_proxy_error(proxy, engine_name)
+    
+    def handle_request_success(self, proxy: str) -> None:
+        """
+        Handle a successful request.
+        
+        Args:
+            proxy: The proxy that was used
+        """
+        # Mark the proxy as successful
+        if proxy and self.proxy_manager:
+            self.proxy_manager.mark_proxy_success(proxy)
     
     def get_supported_engines(self) -> List[str]:
         """
