@@ -45,6 +45,9 @@ class Settings(Settings):
     USE_CONCURRENT_SEARCH: bool = True
     MAX_CONCURRENT_SEARCHES: int = 5
 
+    # Rate limiting bypass settings
+    USE_USER_AGENT_ROTATION: bool = True  # Enable user agent rotation
+
     # Configure to read from .env file
     if USING_PYDANTIC_V2:
         # Pydantic v2 config
