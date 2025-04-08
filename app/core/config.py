@@ -40,6 +40,10 @@ class Settings(Settings):
     
     # Timeout settings
     SEARCH_TIMEOUT: int = 30  # seconds
+    
+    # Concurrent execution settings
+    USE_CONCURRENT_SEARCH: bool = True
+    MAX_CONCURRENT_SEARCHES: int = 5
 
     # Configure to read from .env file
     if USING_PYDANTIC_V2:

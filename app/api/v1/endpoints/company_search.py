@@ -21,7 +21,7 @@ async def search_by_company_name(
     """
     Perform a search for a company name across multiple search engines.
     
-    This endpoint accepts a company name and performs two strategic searches:
+    This endpoint accepts a company name and performs two strategic searches concurrently:
     1. A general search for the company using the first engine with a query optimized to find company information
     2. A search specifically for the company's official website using the second engine (if available)
     
@@ -41,10 +41,12 @@ async def search_by_company_name(
         # Use specified engines or default ones
         engines = request.engines or settings.DEFAULT_SEARCH_ENGINES
         
-        # Create search service 
+        # Create search service with concurrent execution
         search_service = SearchService(
             engines=engines,
-            use_proxy=request.use_proxy or settings.USE_PROXY
+            use_proxy=request.use_proxy or settings.USE_PROXY,
+            use_concurrent=settings.USE_CONCURRENT_SEARCH,
+            max_workers=settings.MAX_CONCURRENT_SEARCHES
         )
         
         # Perform the search

@@ -19,11 +19,12 @@ async def full_search(
     background_tasks: BackgroundTasks,
 ):
     """
-    Perform a comprehensive search for a person at a specific company domain.
+    Perform a comprehensive search for a person at a specific company domain concurrently.
     
     This endpoint accepts a person's full name and a company domain and searches for
     relevant information across multiple search engines. It constructs complex search
     queries with various email patterns to find the most relevant information.
+    Searches are executed in parallel for faster response times.
     
     - **full_name**: Person's full name to search for (required)
     - **domain**: Company domain to search for (required)
@@ -40,10 +41,12 @@ async def full_search(
         # Use specified engines or default ones
         engines = request.engines or settings.DEFAULT_SEARCH_ENGINES
         
-        # Create search service 
+        # Create search service with concurrent execution
         search_service = SearchService(
             engines=engines,
-            use_proxy=request.use_proxy or settings.USE_PROXY
+            use_proxy=request.use_proxy or settings.USE_PROXY,
+            use_concurrent=settings.USE_CONCURRENT_SEARCH,
+            max_workers=settings.MAX_CONCURRENT_SEARCHES
         )
         
         # Perform the search

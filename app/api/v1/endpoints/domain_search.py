@@ -13,18 +13,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/by-domain", response_model=SearchResponse, summary="Search by domain name")
+@router.post("/by-domain", response_model=SearchResponse, summary="Search by domain")
 async def search_by_domain(
     request: DomainSearchRequest,
     background_tasks: BackgroundTasks,
 ):
     """
-    Perform a search for a company domain across multiple search engines.
+    Perform a search for a company domain across multiple search engines concurrently.
     
-    This endpoint accepts a domain name and returns search results from various
+    This endpoint accepts a company domain and returns search results from various
     search engines, including titles, URLs, and descriptions of the results.
+    Searches are executed in parallel for faster response times.
     
-    - **domain**: Company domain to search for (required)
+    - **domain**: Domain to search for (required)
     - **engines**: Optional list of search engines to use (defaults to all available)
     - **pages**: Number of result pages to retrieve (default: 1)
     - **ignore_duplicates**: Whether to ignore duplicate URLs in results (default: true)
@@ -38,10 +39,12 @@ async def search_by_domain(
         # Use specified engines or default ones
         engines = request.engines or settings.DEFAULT_SEARCH_ENGINES
         
-        # Create search service 
+        # Create search service with concurrent execution
         search_service = SearchService(
             engines=engines,
-            use_proxy=request.use_proxy or settings.USE_PROXY
+            use_proxy=request.use_proxy or settings.USE_PROXY,
+            use_concurrent=settings.USE_CONCURRENT_SEARCH,
+            max_workers=settings.MAX_CONCURRENT_SEARCHES
         )
         
         # Perform the search
